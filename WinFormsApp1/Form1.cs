@@ -1,18 +1,15 @@
 using System;
-using System.Configuration;
-using System.Data;
+using System.Linq;
 using System.Windows.Forms;
-using Npgsql; 
+using Microsoft.EntityFrameworkCore;
+using WinFormsApp1.Models;
 
-namespace WinFormsApp1 
+namespace WinFormsApp1
 {
     public partial class Form1 : Form
     {
-        string connectionString = ConfigurationManager.ConnectionStrings["TestConnection"].ConnectionString;
-
-        DataSet dataSet;
-        NpgsqlDataAdapter adapterClient;
-        NpgsqlDataAdapter adapterZone;
+        //контекст для работы с бд
+        private ApplicationContext _context = new ApplicationContext();
 
         public Form1()
         {
@@ -23,43 +20,48 @@ namespace WinFormsApp1
         {
             try
             {
-                dataSet = new DataSet();
+                //загружаем клиентов
+                _context.Clients.Load();
+                dataGridViewClient.DataSource = _context.Clients.Local.ToBindingList();
 
-                adapterClient = new NpgsqlDataAdapter("SELECT * FROM \"Клиент\"", connectionString);
-                NpgsqlCommandBuilder builderClient = new NpgsqlCommandBuilder(adapterClient);
-                adapterClient.Fill(dataSet, "Клиент");
-
-                BindingSource bsClient = new BindingSource();
-                bsClient.DataSource = dataSet.Tables["Клиент"];
-                dataGridViewClient.DataSource = bsClient;
-
-
-                adapterZone = new NpgsqlDataAdapter("SELECT * FROM \"Зона аквапарка\"", connectionString);
-                NpgsqlCommandBuilder builderZone = new NpgsqlCommandBuilder(adapterZone);
-                adapterZone.Fill(dataSet, "Зона аквапарка");
-
-                BindingSource bsZone = new BindingSource();
-                bsZone.DataSource = dataSet.Tables["Зона аквапарка"];
-                dataGridViewZone.DataSource = bsZone;
+                //загружаем зоны
+                _context.Zones.Load();
+                dataGridViewZone.DataSource = _context.Zones.Local.ToBindingList();
             }
             catch (Exception ex)
             {
-                MessageBox.Show("Ошибка" + ex.Message);
+                MessageBox.Show("Ошибка загрузки: " + ex.Message);
             }
         }
 
-        //КЛИЕНТ
+        // ==== вкладка клиент ====
+
         private void buttonAdd_Click(object sender, EventArgs e)
         {
-            
-            dataSet.Tables["Клиент"].Rows.Add(dataSet.Tables["Клиент"].NewRow());//добавление пустой строки в датасет
+            using (var addForm = new AddClientForm())
+            {
+                if (addForm.ShowDialog() == DialogResult.OK)
+                {
+                    var newClient = new Client
+                    {
+                        ContactInfo = addForm.ContactInfo,
+                        Discount = addForm.Discount
+                    };
+                    _context.Clients.Add(newClient);
+                    _context.SaveChanges();//сохраняем в бд
+                    dataGridViewClient.Refresh();
+                }
+            }
         }
 
         private void buttonDelete_Click(object sender, EventArgs e)
         {
             if (dataGridViewClient.CurrentRow != null)
             {
-                dataGridViewClient.Rows.RemoveAt(dataGridViewClient.CurrentRow.Index);//удаление
+                var client = (Client)dataGridViewClient.CurrentRow.DataBoundItem;
+                _context.Clients.Remove(client);
+                _context.SaveChanges();
+                dataGridViewClient.Refresh();
             }
         }
 
@@ -67,20 +69,8 @@ namespace WinFormsApp1
         {
             try
             {
-                foreach (DataRow row in dataSet.Tables["Клиент"].Rows)//проверка обязательных полей
-                {
-                    if (row.RowState != DataRowState.Deleted)
-                    {
-                        if (row["Контактная информация"] == DBNull.Value || string.IsNullOrWhiteSpace(row["Контактная информация"].ToString()))
-                        {
-                            MessageBox.Show("Контактная информация не может быть пустой!");
-                            return;
-                        }
-                    }
-                }
-
-                adapterClient.Update(dataSet, "Клиент");
-                MessageBox.Show("Данные клиентов сохранены!");
+                _context.SaveChanges();
+                MessageBox.Show("Данные сохранены!");
             }
             catch (Exception ex)
             {
@@ -88,17 +78,25 @@ namespace WinFormsApp1
             }
         }
 
-        //зона
+        // ==== вкладка зона аквапарка ====
+
         private void buttonAddZone_Click(object sender, EventArgs e)
         {
-            dataSet.Tables["Зона аквапарка"].Rows.Add(dataSet.Tables["Зона аквапарка"].NewRow());
+            //просто добавляем пустую зону, потом можно отредактировать в таблице
+            var newZone = new Zone { Name = "Новая зона", Cost = 0 };
+            _context.Zones.Add(newZone);
+            _context.SaveChanges();
+            dataGridViewZone.Refresh();
         }
 
         private void buttonDeleteZone_Click(object sender, EventArgs e)
         {
             if (dataGridViewZone.CurrentRow != null)
             {
-                dataGridViewZone.Rows.RemoveAt(dataGridViewZone.CurrentRow.Index);
+                var zone = (Zone)dataGridViewZone.CurrentRow.DataBoundItem;
+                _context.Zones.Remove(zone);
+                _context.SaveChanges();
+                dataGridViewZone.Refresh();
             }
         }
 
@@ -106,61 +104,71 @@ namespace WinFormsApp1
         {
             try
             {
-                adapterZone.Update(dataSet, "Зона аквапарка");
-                MessageBox.Show("Данные зон сохранены!");
+                _context.SaveChanges();
+                MessageBox.Show("Зоны сохранены!");
             }
             catch (Exception ex)
             {
-                MessageBox.Show("Ошибка сохранения: " + ex.Message);
+                MessageBox.Show("Ошибка: " + ex.Message);
             }
         }
 
-        //RAW SQL
+        // ==== вкладка raw sql (теперь linq) ====
+
         private void buttonSearch_Click(object sender, EventArgs e)
         {
-            using (NpgsqlConnection conn = new NpgsqlConnection(connectionString))
+            try
             {
-                try
-                {
-                    conn.Open();
-                    //поиск клиента по контактной информации
-                    string sql = "SELECT * FROM \"Клиент\" WHERE \"Контактная информация\" LIKE @name";
+                string searchText = textBoxSearch.Text;
 
-                    NpgsqlCommand cmd = new NpgsqlCommand(sql, conn);
-                    cmd.Parameters.AddWithValue("@name", "%" + textBoxSearch.Text + "%");
+                //linq: фильтрация, группировка, проекция
+                var query = _context.Clients
+                    .Where(c => c.ContactInfo.Contains(searchText))
+                    .GroupBy(c => c.Discount)
+                    .Select(g => new
+                    {
+                        Размер_скидки = g.Key,
+                        Количество_клиентов = g.Count()
+                    })
+                    .ToList();
 
-                    NpgsqlDataReader reader = cmd.ExecuteReader();
-
-                    DataTable dt = new DataTable();
-                    dt.Load(reader);
-                    dataGridViewSearch.DataSource = dt;
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show("Ошибка поиска: " + ex.Message);
-                }
+                dataGridViewSearch.DataSource = query;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Ошибка поиска: " + ex.Message);
             }
         }
 
-        //ХРАНИМАЯ ПРОЦЕДУРА
+        // ==== вкладка хранимая процедура ====
+
         private void buttonProc_Click(object sender, EventArgs e)
         {
             try
             {
-                DataSet dsProc = new DataSet();
+                decimal minDiscount = numericUpDown1.Value;
 
-                NpgsqlDataAdapter da = new NpgsqlDataAdapter("SELECT * FROM get_clients_by_discount(@min_discount)", connectionString);
+                //вызов функции postgresql через ef
+                var result = _context.Database
+                    .SqlQueryRaw<ClientDto>(
+                        "SELECT client_id AS \"ClientId\", contact_info AS \"ContactInfo\", discount AS \"Discount\" FROM get_clients_by_discount({0})",
+                        minDiscount)
+                    .ToList();
 
-                da.SelectCommand.CommandType = CommandType.Text;//указываем тип как текст а не StoredProcedure
-
-                da.SelectCommand.Parameters.AddWithValue("@min_discount", numericUpDown1.Value);//добавление параметра
-                da.Fill(dsProc, "Result");
-                dataGridViewProc.DataSource = dsProc.Tables["Result"];
+                dataGridViewProc.DataSource = result;
             }
             catch (Exception ex)
             {
-                MessageBox.Show("Ошибка" + ex.Message);
+                MessageBox.Show("Ошибка вызова процедуры: " + ex.Message);
             }
         }
+    }
+
+    //dto для результата хранимой функции
+    public class ClientDto
+    {
+        public int ClientId { get; set; }
+        public string ContactInfo { get; set; }
+        public decimal Discount { get; set; }
     }
 }
